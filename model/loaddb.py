@@ -20,12 +20,15 @@ cur = conn.cursor()
 cur.execute("TRUNCATE TABLE store_status;")
 cur.execute("TRUNCATE TABLE business_hours;")
 cur.execute("TRUNCATE TABLE timezone;")
+cur.execute("DROP TABLE IF EXISTS store;")
+conn.commit()
 
 # Define the file paths of the CSV files to load
-store_status_csv = os.getenv("CSV_PATH") + "/store_status.csv"
-business_hours_csv = os.getenv("CSV_PATH") + "/business_hours.csv"
-timezone_csv = os.getenv("CSV_PATH") + "/timezone.csv"
-store_csv = os.getenv("CSV_PATH") + "/store_status.csv"
+ROOTPATH = os.getenv("CSV_PATH")
+store_status_csv = ROOTPATH + "/store_status.csv"
+business_hours_csv = ROOTPATH + "/business_hours.csv"
+timezone_csv = ROOTPATH + "/timezone.csv"
+store_csv = ROOTPATH + "/store_status.csv"
 
 # Define the SQL statement to load the store_status CSV file into the table
 load_store_status_query = '''COPY store_status(store_id, status, timestamp_utc)
@@ -46,9 +49,11 @@ load_timezone_query = '''COPY timezone(store_id, timezone_str)
                          CSV HEADER;'''.format(timezone_csv)
 
 # create temp table to store store_id
-create_temp_table_query = '''CREATE TABLE store AS
+create_store_query = '''CREATE TABLE store AS
                                 SELECT DISTINCT store_id
                                 FROM store_status;'''
+
+cluster_store_status_query = '''CLUSTER store_status USING store_id_idx;'''
 
 
 
@@ -56,9 +61,7 @@ create_temp_table_query = '''CREATE TABLE store AS
 cur.execute(load_store_status_query)
 cur.execute(load_business_hours_query)
 cur.execute(load_timezone_query)
-cur.execute(create_temp_table_query)
-
-# Commit the changes to the database
+cur.execute(create_store_query)
 conn.commit()
 
 # Close the cursor and the connection

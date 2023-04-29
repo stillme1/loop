@@ -1,77 +1,129 @@
-import os
-from dotenv import load_dotenv
-import psycopg2
-from datetime import datetime, timedelta, timezone
-import pytz
+import csv
+import datetime
+
 import const as const
+import query as query
 
 
-def getBusinessHoursInUCT(store_id, cur):
-    # Get the timezone for the store
-    get_timezone_query = f"SELECT timezone_str FROM timezone WHERE store_id = {store_id}"
-    cur.execute(get_timezone_query)
+def optimisticDowntime(startTime, endTime, pollData, businessHours):
+    downtime = 0
+    lastPollTime = startTime
+    up = 0
+    down = 0
     
-    timezone_str = const.DEFAULT_TIMEZONE if cur.rowcount==0 else cur.fetchone()[0]
-    timezone_obj = pytz.timezone(timezone_str)
-    delta = timezone_obj.utcoffset(datetime.now())
-
-    # print(delta)
-
-    # Get the business hours for the store
-    get_business_hours_query = f"SELECT * FROM business_hours WHERE store_id = {store_id}"
-    cur.execute(get_business_hours_query)
-    
-
-    uct_time = const.DEFAULT_BUSINESS_HOURS if cur.rowcount==0 else []
-    for row in cur:
-        localStartTime = datetime.combine(const.BASE_TIME, row[2])
-        localEndTime = datetime.combine(const.BASE_TIME, row[3])
+    for i in range(len(pollData)):
+        if pollData[i][0] < startTime:
+            continue
+        active, sinceOpen, untilClose = query.isBusinessHour(pollData[i][0], businessHours)
+        if pollData[i][1] == 'active  ' and active:
+            up += 1
+        elif pollData[i][1] == 'inactive' and active:
+            down += 1
         
-        utcStartTime = localStartTime - delta
-        utcEndTime = localEndTime - delta
-        
-        day1 = 0
-        day2 = 0
-        if(utcStartTime.day != localStartTime.day):
-            day1 = -1 if delta.days==0 else 1
-        if(utcEndTime.day != localEndTime.day):
-            day2 = -1 if delta.days==0 else 1
-        
-        day1 = (day1 + row[1] + 7) % 7
-        day2 = (day2 + row[1] + 7) % 7
+        if (not active) or pollData[i][1] == 'active  ':
+            lastPollTime = pollData[i][0]
+            continue
+        dt = min(60, (pollData[i][0] - lastPollTime).total_seconds() / 60) / 2
+        dt = min(dt, sinceOpen)
+        downtime += dt
 
-        if(day1 == day2):
-            uct_time.append([day1, utcStartTime.time(), utcEndTime.time()])
+        lastPollTime = pollData[i][0]
+
+        if i < len(pollData) - 1:
+            dt = min(60, (pollData[i+1][0] - pollData[i][0]).total_seconds() / 60) / 2
+            dt = min(dt, untilClose)
+            downtime += dt
         else:
-            uct_time.append([day1, utcStartTime.time(), const.EOD])
-            uct_time.append([day2, const.BOD, utcEndTime.time()])
+            dt = min(60, (endTime - pollData[i][0]).total_seconds() / 60) / 2
+            dt = min(dt, untilClose)
+            downtime += dt
+    return downtime, 1 if (up + down == 0) else up/(up+down)
 
-    return sorted(uct_time, key=lambda x: (x[0], x[1]))
+def pessimisticUptime(startTime, endTime, pollData, businessHours):
+    uptime = 0
+
+    lastPollTime = startTime
+
+    for i in range(len(pollData)):
+        if pollData[i][0] < startTime:
+            continue
+        active, sinceOpen, untilClose = query.isBusinessHour(pollData[i][0], businessHours)
+        if (not active) or pollData[i][1] == 'inactive':
+            lastPollTime = pollData[i][0]
+            continue
+        dt = min(120, (pollData[i][0] - lastPollTime).total_seconds() / 60) / 2
+        dt = min(dt, sinceOpen)
+        uptime += dt
+
+        lastPollTime = pollData[i][0]
+
+        if i < len(pollData) - 1:
+            dt = min(120, (pollData[i+1][0] - pollData[i][0]).total_seconds() / 60) / 2
+            dt = min(dt, untilClose)
+            uptime += dt
+        else:
+            dt = min(120, (endTime - pollData[i][0]).total_seconds() / 60) / 2
+            dt = min(dt, untilClose)
+            uptime += dt
+        
+    return uptime
+
+
+def lastWeekUptimeAndDowntime(pollData, businessHours):
+    totalBusinessMinutes = query.getBusinessMinutesBetweenTwoTime(const.BASE_DATETIME - const.ONE_WEEK, const.BASE_DATETIME, businessHours)
+    lowDowntime, fraction = optimisticDowntime(const.BASE_DATETIME - const.ONE_WEEK, const.BASE_DATETIME, pollData, businessHours)
+    lowUpTime = pessimisticUptime(const.BASE_DATETIME - const.ONE_WEEK, const.BASE_DATETIME, pollData, businessHours)
+
+    highUptime = totalBusinessMinutes - lowDowntime
+
+    uptime = highUptime * fraction + (1-fraction) * lowUpTime
+    downTime = totalBusinessMinutes - uptime
+    return uptime/60, downTime/60
+
+def lastDayUptimeAndDowntime(pollData, businessHours):
+    totalBusinessMinutes = query.getBusinessMinutesBetweenTwoTime(const.BASE_DATETIME - const.ONE_DAY, const.BASE_DATETIME, businessHours)
+    lowDowntime, fraction = optimisticDowntime(const.BASE_DATETIME - const.ONE_DAY, const.BASE_DATETIME, pollData, businessHours)
+    lowUpTime = pessimisticUptime(const.BASE_DATETIME - const.ONE_DAY, const.BASE_DATETIME, pollData, businessHours)
+
+    highUptime = totalBusinessMinutes - lowDowntime
+
+    uptime = highUptime * fraction + (1-fraction) * lowUpTime
+    downTime = totalBusinessMinutes - uptime
+    return uptime/60, downTime/60
+
+def lastHourUptime(pollData, businessHours):
+    totalBusinessMinutes = query.getBusinessMinutesBetweenTwoTime(const.BASE_DATETIME - const.ONE_HOUR, const.BASE_DATETIME, businessHours)
+    lowDowntime, _ = optimisticDowntime(const.BASE_DATETIME - const.ONE_HOUR, const.BASE_DATETIME, pollData, businessHours)
+    lowUpTime = pessimisticUptime(const.BASE_DATETIME - const.ONE_HOUR, const.BASE_DATETIME, pollData, businessHours)
+    _, fraction = optimisticDowntime(const.BASE_DATETIME - const.THREE_HOURS, const.BASE_DATETIME, pollData, businessHours)
+
+    highUptime = totalBusinessMinutes - lowDowntime
+
+    uptime = highUptime * fraction + (1-fraction) * lowUpTime
+    downTime = totalBusinessMinutes - uptime
+    return uptime, downTime
 
 
 
+def generate_report(report_id):
+    query.clusterStoreStatus()
+    storeWithBusinessHours = query.getStoreIdWithBusinessHours()
+    
+    with open(f'{const.ROOTPATH}/{report_id}.csv', mode='w', newline='') as report_file:
+        report_writer = csv.writer(report_file, delimiter=',')
 
-load_dotenv()
-# Connect to PostgreSQL database
-conn = psycopg2.connect(
-    host=os.getenv("DB_HOST"),
-    database=os.getenv("DB_NAME"),
-    user=os.getenv("DB_USER"),
-    password=os.getenv("DB_PASSWORD"),
-    port=os.getenv("DB_PORT"),
-)
+        # Write the column names to the CSV file
+        report_writer.writerow(['store_id', 'uptime_last_hour', 'uptime_last_day', 'uptime_last_week', 'downtime_last_hour', 'downtime_last_day', 'downtime_last_week'])
 
-# Create a cursor object
-cur = conn.cursor()
+        for storeId, businessHours in storeWithBusinessHours:
+            pollData = query.getPollData(const.BASE_DATETIME - const.ONE_WEEK, const.BASE_DATETIME, storeId)
 
-# get first 100 store_id
-get_store_id_query = "SELECT store_id FROM store LIMIT 14092"
-cur.execute(get_store_id_query)
+            uptime_last_week, downtime_last_week = lastWeekUptimeAndDowntime(pollData, businessHours)
+            uptime_last_day, downtime_last_day = lastDayUptimeAndDowntime(pollData, businessHours)
+            uptime_last_hour, downtime_last_hour = lastHourUptime(pollData, businessHours)
 
-rows = cur.fetchall()
-for row in rows:
-    store_id = row[0]
-    x = getBusinessHoursInUCT(store_id, cur)
-    print(f"Store {store_id} business hours in UTC:")
-    for i in x:
-        print(i)
+            # Write the data for the current store to the CSV file
+            report_writer.writerow([storeId, uptime_last_hour, uptime_last_day, uptime_last_week, downtime_last_hour, downtime_last_day, downtime_last_week])
+    query.updateReport("done", report_id)
+    # print current time
+    print("here", datetime.datetime.now())
