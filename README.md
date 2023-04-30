@@ -27,7 +27,7 @@ Start the server:
 To initialize and load the database:
 ```
 python model/database.py
-python model.loaddb.py
+python model/loaddb.py
 ```
 
 To run the service:
