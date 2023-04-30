@@ -21,8 +21,8 @@ store 3 csv in the ```CSV_PATH```:
 
 
 Start the server:
-Install and setup postgres locally
-Install required python dependencies
+- Install and setup postgres locally
+- Install required python dependencies
 
 To initialize and load the database:
 ```
